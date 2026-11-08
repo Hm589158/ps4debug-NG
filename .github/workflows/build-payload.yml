@@ -1,0 +1,84 @@
+name: Build payload
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/build-payload
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-13 g++-13 clang-18 binutils make python3
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
+          sudo update-alternatives --set gcc /usr/bin/gcc-13
+
+      - name: Show toolchain
+        run: |
+          . /etc/os-release && echo "OS: $ID $VERSION_ID"
+          gcc --version | head -1
+          clang++-18 --version | head -1
+          test "$(gcc -dumpfullversion -dumpversion)" = "13.3.0"
+
+      - name: Build (bash build.sh)
+        run: bash build.sh
+
+      - name: Run host unit tests
+        run: make -C debugger test
+
+      - name: Verify payload exists
+        run: |
+          test -s ps4debug-ng.bin || { echo "::error::ps4debug-ng.bin was not produced"; exit 1; }
+          ls -l ps4debug-ng.bin
+
+      - name: Verify capability level 1.2
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          ver = re.search(r'PS4DEBUG_NG_VERSION_STR\s+"([^"]+)"', open("version.h").read()).group(1)
+          brand = ("ps4debug-NG by Pharaoh2k v" + ver + "\0").encode()
+          data = open("ps4debug-ng.bin", "rb").read()
+          i = data.find(brand)
+          if i < 0:
+              sys.exit("::error::CMD_BRANDING string not found in ps4debug-ng.bin")
+          level = data[i + len(brand):i + len(brand) + 3]
+          print("Brand:", brand[:-1].decode(), "| capability level:", level.decode(errors="replace"))
+          if level != b"1.2":
+              sys.exit("::error::expected capability level 1.2, found %r" % level)
+          PY
+
+      - name: Size and SHA-256
+        run: |
+          SIZE=$(stat -c %s ps4debug-ng.bin)
+          SHA=$(sha256sum ps4debug-ng.bin | cut -d' ' -f1)
+          echo "Size: $SIZE bytes"
+          echo "SHA-256: $SHA"
+          {
+            echo "### ps4debug-ng.bin"
+            echo "| Size (bytes) | SHA-256 |"
+            echo "|---|---|"
+            echo "| $SIZE | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          sha256sum ps4debug-ng.bin > ps4debug-ng.bin.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps4debug-NG-Custom-Port
+          path: |
+            ps4debug-ng.bin
+            ps4debug-ng.bin.sha256
+          if-no-files-found: error
